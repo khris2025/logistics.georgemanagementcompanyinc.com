@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use App\Models\Package;
 use Illuminate\Support\Facades\Http; 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
 class PackageController extends Controller
@@ -14,85 +15,6 @@ class PackageController extends Controller
     {
         return view('packagecreate');
     }
-
-   
-
-    // public function store(Request $request)
-    // {
-        
-        
-
-    //     $request->validate([
-    //         'sendersname'       => 'required|string|max:255',
-    //         'sendersemail'      => 'required|email|max:255',
-    //         'recieversname'     => 'required|string|max:255',
-    //         'recieversemail'    => 'required|email|max:255',
-    //         'recievers_phone'   => 'required|string|max:20',
-    //         'weight'            => 'required|string|min:0',
-    //         'pickup_address'    => 'required|string|max:255',
-    //         'dropoff_address'   => 'required|string|max:255',
-
-    //         'date'              => 'required|date', // Expected delivery date
-    //         'pickup_date'       => 'required|date', // Assuming pickup is before delivery
-
-
-    //         'type_shipment'     => 'required|string|max:100',
-    //         'product_name'      => 'required|string|max:255',
-    //         'total_freight'     => 'required|numeric|min:0',
-    //     ]);
-
-        
-
-    //     // 🔹 Get pickup coordinates
-    //     $pickupCoords = $this->getCoordinates($request->pickup_address);
-    //     if (!$pickupCoords['lat'] || !$pickupCoords['lng']) {
-    //         return redirect()->back()->with('error', 'Could not fetch coordinates for Pickup Address.');
-    //     }
-
-    //     // 🔹 Get drop-off coordinates
-    //     $dropoffCoords = $this->getCoordinates($request->dropoff_address);
-    //     if (!$dropoffCoords['lat'] || !$dropoffCoords['lng']) {
-    //         return redirect()->back()->with('error', 'Could not fetch coordinates for Drop-off Address.');
-    //     }
-
-    //     $trackingNumber = 'TRK-' . strtoupper(Str::random(10)); // Example: TRK-A1B2C3D4E5
-
-    //     // 🔹 Create package
-    //     $package = Package::create([
-    //         'tracking_number'   => $trackingNumber,
-
-    //         'sendersname'       => $request->sendersname,
-    //         'sendersemail'      => $request->sendersemail,
-
-    //         'recieversname'     => $request->recieversname,
-    //         'recieversemail'    => $request->recieversemail,
-    //         'recievers_phone'   => $request->recievers_phone,
-
-    //         'weight'            => $request->weight,
-
-    //         'pickup_address'    => $request->pickup_address,
-    //         'pickup_lat'        => $pickupCoords['lat'],
-    //         'pickup_lng'        => $pickupCoords['lng'],
-
-    //         'dropoff_address'   => $request->dropoff_address,
-    //         'dropoff_lat'       => $dropoffCoords['lat'],
-    //         'dropoff_lng'       => $dropoffCoords['lng'],
-
-    //         'current_lat'       => $pickupCoords['lat'], // Start at pickup location
-    //         'current_lng'       => $pickupCoords['lng'],
-    //         'status'            => 'preparing for shipping 🎉',
-
-    //         'date'              => $request->date, // Expected delivery date
-    //         'pickup_date'       => $request->pickup_date,
-
-    //         'type_shipment'     => $request->type_shipment,
-    //         'product_name'      => $request->product_name,
-    //         'total_freight'     => $request->total_freight,
-    //     ]);
-
-
-    //     return redirect()->back()->with('success', 'Package created successfully!');
-    // }
 
     public function store(Request $request)
     {
@@ -119,8 +41,23 @@ class PackageController extends Controller
     ]);
 
     // Optional: derive clean address from coordinates
-    $pickup_address  = $this->reverseGeocode($request->pickup_lat, $request->pickup_lng) ?? $request->pickup_address;
-    $dropoff_address = $this->reverseGeocode($request->dropoff_lat, $request->dropoff_lng) ?? $request->dropoff_address;
+    // $pickup_address  = $this->reverseGeocode($request->pickup_lat, $request->pickup_lng) ?? $request->pickup_address;
+    // $dropoff_address = $this->reverseGeocode($request->dropoff_lat, $request->dropoff_lng) ?? $request->dropoff_address;
+
+    // Reverse geocode pickup
+    $pickup_address = $this->reverseGeocode(
+        $request->pickup_lat,
+        $request->pickup_lng
+    );
+
+    // Respect Nominatim rate limit (1 request / second)
+    usleep(1100000); // 1.1 seconds
+
+    // Reverse geocode dropoff
+    $dropoff_address = $this->reverseGeocode(
+        $request->dropoff_lat,
+        $request->dropoff_lng
+    );
 
     $trackingNumber = 'TRK-' . strtoupper(Str::random(10));
 
@@ -161,22 +98,58 @@ class PackageController extends Controller
     return redirect()->back()->with('success', 'Package created successfully!');    
     }
 
+    // private function reverseGeocode($lat, $lng)
+    // {
+    // $response = Http::withHeaders([
+    //     'User-Agent' => 'LaravelApp/1.0 (youremail@example.com)'
+    // ])->get('https://nominatim.openstreetmap.org/reverse', [
+    //     'lat' => $lat,
+    //     'lon' => $lng,
+    //     'format' => 'json',
+    // ]);
+
+    // if ($response->ok() && isset($response->json()['display_name'])) {
+    //     return $response->json()['display_name'];
+    // }
+
+    // return null;
+    // }
+
     private function reverseGeocode($lat, $lng)
-    {
-    $response = Http::withHeaders([
-        'User-Agent' => 'LaravelApp/1.0 (youremail@example.com)'
-    ])->get('https://nominatim.openstreetmap.org/reverse', [
-        'lat' => $lat,
-        'lon' => $lng,
-        'format' => 'json',
-    ]);
+{
+    return Cache::remember(
+        "reverse_geocode:$lat:$lng",
+        now()->addDay(), // cache for 24 hours
+        function () use ($lat, $lng) {
+            try {
+                $response = Http::withOptions([
+                        'force_ip_resolve' => 'v4', // avoid IPv6 issues
+                    ])
+                    ->withHeaders([
+                        'User-Agent' => 'LaravelApp/1.0 (contact@yourdomain.com)',
+                        'Accept'     => 'application/json',
+                    ])
+                    ->timeout(8)        // never hang for 30s
+                    ->retry(1, 1000)    // retry once after 1s
+                    ->get('https://nominatim.openstreetmap.org/reverse', [
+                        'lat'    => $lat,
+                        'lon'    => $lng,
+                        'format' => 'json',
+                    ]);
 
-    if ($response->ok() && isset($response->json()['display_name'])) {
-        return $response->json()['display_name'];
-    }
+                return $response->json('display_name');
+            } catch (\Throwable $e) {
+                logger()->warning('Reverse geocode failed', [
+                    'lat' => $lat,
+                    'lng' => $lng,
+                    'error' => $e->getMessage(),
+                ]);
 
-    return null;
-    }
+                return null;
+            }
+        }
+    );
+}
 
 
 
